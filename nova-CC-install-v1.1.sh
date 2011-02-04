@@ -615,4 +615,4 @@ echo 'Enjoy your new private cloud!'
 
 
 #If you run into any problems, please feel free to contact the script maintainers.  
-#You can also get assistance by stopping by irc.freenode.net - #openstack, sending a message to the OpenStack Users maillist - openstack@lists.launchpad.net, or posting at "https://answers.launchpad.net/openstack"
+#You can also get assistance by stopping by irc.freenode.net - #openstack, sending a message to the OpenStack Users maillist - #openstack@lists.launchpad.net, or posting at "https://answers.launchpad.net/openstack"
