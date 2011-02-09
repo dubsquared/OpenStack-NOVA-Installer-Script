@@ -60,9 +60,8 @@ touch /var/log/nova/nova-install.log
     
 echo "Nova Cloud Controller install script v1.0"
 echo
-echo "Setting up the Nova cloud controller is a multi-step process.  After you seed information, \
-the script will take over and finish off the install for you.  Full log of commands will be availible at \
-/var/log/nova/nova-install.log"
+echo "Setting up the Nova cloud controller is a multi-step process.  After you seed information, the script will take over and finish off the install for you. Full log of commands will be availible at /var/log/nova/nova-install.log"
+echo
 
 read -p "Press any key to continue..." -n1 -s 
 echo
@@ -515,7 +514,7 @@ cat >> /etc/nova/nova.conf << NOVA_CONF_EOF
 --network_manager=nova.network.manager.FlatManager
 NOVA_CONF_EOF
 
-echo "Initilizing database"
+echo "Initializing database"
 nova-manage db sync &>> $LOGFILE
 sleep 1
 echo "...done..."
