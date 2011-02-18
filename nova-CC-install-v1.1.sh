@@ -369,9 +369,9 @@ while true; do
 read -p "Please enter your broadcast IP (Default is $BROADCAST -- ENTER to accept):" -e t1
 if [ -n "$t1" ]
 then
-  S3_HOST_IP="$t1"
+  BROADCAST="$t1"
 else
-  S3_HOST_IP="$BROADCAST"
+  BROADCAST="$BROADCAST"
 fi
 if [ $(valid_ipv4 $BROADCAST) == "fail" ]; then
     echo "You have entered an invalid IP address, please try again."
@@ -388,9 +388,9 @@ while true; do
 read -p "Please enter your netmask (Default is $NETMASK -- ENTER to accept):" -e t1
 if [ -n "$t1" ]
 then
-  S3_HOST_IP="$t1"
+  NETMASK="$t1"
 else
-  S3_HOST_IP="$NETMASK"
+  NETMASK="$NETMASK"
 fi
 if [ $(valid_ipv4 $NETMASK) == "fail" ]; then
     echo "You have entered an invalid IP address, please try again."
@@ -407,9 +407,9 @@ while true; do
 read -p "Please enter your gateway (Default is $GATEWAY -- ENTER to accept):" -e t1
 if [ -n "$t1" ]
 then
-  S3_HOST_IP="$t1"
+  GATEWAY="$t1"
 else
-  S3_HOST_IP="$GATEWAY"
+  GATEWAY="$GATEWAY"
 fi
 if [ $(valid_ipv4 $GATEWAY) == "fail" ]; then
     echo "You have entered an invalid IP address, please try again."
@@ -426,9 +426,9 @@ while true; do
 read -p "Please enter your default nameserver (Default is $NAMESERVER -- ENTER to accept):" -e t1
 if [ -n "$t1" ]
 then
-  S3_HOST_IP="$t1"
+  NAMESERVER="$t1"
 else
-  S3_HOST_IP="$NAMESERVER"
+  NAMESERVER="$NAMESERVER"
 fi
 if [ $(valid_ipv4 $NAMESERVER) == "fail" ]; then
     echo "You have entered an invalid IP address, please try again."
