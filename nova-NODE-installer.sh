@@ -80,7 +80,8 @@ echo "Installing required packages"
 echo "############################"
 
 apt-get install -y python-software-properties
-add-apt-repository ppa:nova-core/trunk
+add-apt-repository ppa:nova-core/release
+#add-apt-repository ppa:nova-core/trunk
 apt-get update
 apt-get install -y nova-compute python-mysqldb
 
