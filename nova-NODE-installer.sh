@@ -207,6 +207,25 @@ echo "mySQL Host IP set as \"$MYSQL_HOST_IP\""
 
 echo 
 
+echo "mySQL User Config"
+echo "#################"
+echo
+
+#Setting up mySQL root password, and verify
+while true; do
+read -s -p "Enter mySQL password on controller node: " MYSQL_PASS
+       echo "";
+       read -s -p "Verify password: " MYSQL_PASS2
+       echo "";
+
+       if [ $MYSQL_PASS != $MYSQL_PASS2 ]
+       then
+echo "Passwords do not match...try again.";
+               continue;
+       fi
+break;
+done
+
 echo "Setting up Nova configuration files"
 echo "###################################"
 echo
@@ -218,7 +237,7 @@ cat >> /etc/nova/nova.conf << NOVA_CONF_EOF
 --rabbit_host=$RABBIT_IP
 --cc_host=$CC_HOST_IP
 --ec2_url=http://$S3_HOST_IP:8773/services/Cloud
---sql_connection=mysql://root:nova@$MYSQL_HOST_IP/nova
+--sql_connection=mysql://root:$MYSQL_PASS@$MYSQL_HOST_IP/nova
 --network_manager=nova.network.manager.FlatManager
 NOVA_CONF_EOF
 echo "...done..."
