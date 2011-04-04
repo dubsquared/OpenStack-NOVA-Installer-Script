@@ -1,34 +1,89 @@
 #!/bin/bash
 
-# Copyright (c) 2010 OpenStack, LLC.
+# Copyright (c) 2010-2011 OpenStack, LLC.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
-#    http://www.apache.org/licenses/LICENSE-2.0
-
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-# implied.
-
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Written by Wayne A. Walls (dubsquared) with the amazing help of Jordan Rinke (JordanRinke), Vish Ishaya (vishy),
-# and a lot of input from the fine folks in #openstack on irc.freenode.net!
+# nova-cc-installer.sh -- configure a fully functioning OpenStack Nova cloud controller
+
+# This script is intended to be ran on a fresh install on Ubuntu 10.04 64-bit.
+# Once ran with the appropiate varibles, will produce a fully functioning Nova
+# Cloud Contoller. I am working on getting this working on all flavors of
+# Ubuntu, and eventually RPM based distros. Please feel free to reach out to
+# script maintainers for anything that can be done better. I'm pretty new to
+# this scripting business so I'm sure there is room for improvement!
+
+# Written by Wayne A. Walls (dubsquared) with the amazing help of Jordan Rinke
+# (JordanRinke), Vish Ishaya (vishy), Aaron Bull Schaefer (elasticdog), and
+# a lot of input from the fine folks in #openstack on irc.freenode.net!
 
 # Please contact script maintainers for questions, comments, or concerns:
-# Wayne  ->  wayne@openstack.org
-# Jordan ->  jordan@openstack.org
+#   Wayne  -> wayne@openstack.org
+#   Jordan -> jordan@openstack.org
 
-# This script is intended to be ran on a fresh install on Ubuntu 10.04 64-bit.  Once ran with
-# the appropiate varibles, will produce a fully functioning Nova Cloud Contoller.  I am working on
-# getting this working on all flavors of Ubuntu, and eventually RPM based distros.  Please feel free
-# to reach out to script maintainers for anything that can be done better.  I'm pretty new to this scripting business
-# so I'm sure there is room for improvement!
 
-# Usage:  bash nova-CC-installer.sh
+##### Constants
+
+readonly VERSION=1.1  # release version of this script
+
+readonly BASENAME="${0##*/}"  # name of this script for error output
+
+readonly EX_USAGE=64  # command line usage error
+readonly EX_OK=0      # successful termination
+
+
+##### Functions
+
+# display the script's help message
+show_help() {
+	cat <<EOF
+
+NAME
+     nova-cc-install -- configure a fully functioning OpenStack Nova cloud controller
+
+SYNOPSIS
+     nova-cc-install [-V] [-h]
+
+OPTIONS
+     -V, --version
+          print version information and exit
+
+     -h, --help
+          view this help message describing the available options
+
+EOF
+}
+
+
+##### Main
+
+# read command-line arguments
+while [[ $1 == -* ]]; do
+	case "$1" in
+		-h|--help|-\?)
+			show_help
+			exit $EX_OK
+			;;
+		-V|--version)
+			echo "$BASENAME $VERSION"
+			exit $EX_OK
+			;;
+		-*)
+			echo "Invalid option: $1" 1>&2
+			show_help
+			exit $EX_USAGE
+			;;
+	esac
+done
 
 # This is a Linux check
 if [ `uname -a | grep -i linux | wc -l` -lt 1 ]; then
