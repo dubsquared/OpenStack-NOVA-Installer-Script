@@ -18,9 +18,7 @@
 # This script is intended to be ran on a fresh install on Ubuntu 10.04 64-bit.
 # Once ran with the appropiate varibles, will produce a fully functioning Nova
 # Cloud Contoller. I am working on getting this working on all flavors of
-# Ubuntu, and eventually RPM based distros. Please feel free to reach out to
-# script maintainers for anything that can be done better. I'm pretty new to
-# this scripting business so I'm sure there is room for improvement!
+# Ubuntu, and eventually RPM-based distros.
 
 # Written by Wayne A. Walls (dubsquared) with the amazing help of Jordan Rinke
 # (JordanRinke), Vish Ishaya (vishy), Aaron Bull Schaefer (elasticdog), and
@@ -30,43 +28,343 @@
 #   Wayne  -> wayne@openstack.org
 #   Jordan -> jordan@openstack.org
 
+# You can also get assistance by stopping by irc.freenode.net - #openstack,
+# sending a message to the OpenStack mailing list - openstack@lists.launchpad.net,
+# or posting at https://answers.launchpad.net/openstack
+
 
 ##### Constants
 
 readonly VERSION=1.1  # release version of this script
 
-readonly BASENAME="${0##*/}"  # name of this script for error output
+readonly BASENAME="${0##*/}"                   # name of this script for error output
+readonly LOG_FILE='/var/log/nova/install.log'  # location of script log file
+readonly PARAMETERS="$*"                       # all of the specified input parameters
+readonly PPA='ppa:nova-core/release'           # which ppa to install packages from
+readonly ROOT_UID=0                            # users with $UID 0 have root privileges
 
-readonly EX_USAGE=64  # command line usage error
-readonly EX_OK=0      # successful termination
+# Exit codes
+readonly EX_OK=0       # successful termination
+readonly EX_USAGE=64   # command line usage error
+readonly EX_OSFILE=72  # critical OS file missing
+readonly EX_NOPERM=77  # permission denied
 
+# Dependencies
+readonly REQUIRED_PACKAGES="
+euca2ools
+mysql-server
+nova-api
+nova-compute
+nova-network
+nova-objectstore
+nova-scheduler
+python-mysqldb
+unzip
+vim
+"
 
 ##### Functions
 
-# display the script's help message
+# Display the script's help message
 show_help() {
-	cat <<EOF
+	cat <<-EOF
 
-NAME
-     nova-cc-install -- configure a fully functioning OpenStack Nova cloud controller
+	NAME
+	     $BASENAME -- configure a fully functioning OpenStack Nova cloud controller
 
-SYNOPSIS
-     nova-cc-install [-V] [-h]
+	SYNOPSIS
+	     $BASENAME [-V] [-h]
 
-OPTIONS
-     -V, --version
-          print version information and exit
+	OPTIONS
+	     -V, --version
+	          print version information and exit
 
-     -h, --help
-          view this help message describing the available options
+	     -h, --help
+	          view this help message describing the available options
 
-EOF
+	EOF
+}
+
+# Determine whether the provided input is an integer, and optionally, less than or equal to
+# the given maximum
+is_integer() {
+	local input="$1"
+	# maximum might not be set
+	set +o nounset
+	local maximum="$2"
+	set -o nounset
+
+	case "$input" in
+		# reject the following:
+		#   empty strings
+		#   anything other than digits
+		""|*[!0-9]*) return 1 ;;
+	esac
+
+	if [[ -n $maximum ]]; then
+		[[ $input -le $maximum ]]
+	fi
+}
+
+# Print message to stderr and exit with the given status if one was supplied, otherwise 1
+error_exit() {
+	local message="$1"
+	local status="$2"
+	local max_status=255
+
+	echo "ERROR: $message" 1>&2
+
+	# supplied status code must be an integer in the 0 to 255 range
+	if is_integer "$status" "$max_status"; then
+		exit $status
+	else
+		exit 1
+	fi
+}
+
+# Ensure user has root privileges and that we're on a supported linux box
+check_safety() {
+	# root check
+	if [[ $UID -ne $ROOT_UID ]]; then
+		error_exit 'permission denied - you must have root privileges to run this script' $EX_NOPERM
+	fi
+
+	# linux check
+	if [[ $OSTYPE != linux* ]]; then
+		error_exit 'not compatible - you must run this script on a Linux system' $EX_OSFILE
+	fi
+
+	# distribution check
+	if [[ -f /etc/lsb-release ]]; then
+		readonly DISTRO='ubuntu'
+	else
+		error_exit 'not compatible - this script only supports Ubuntu at this time' $EX_OSFILE
+	fi
+}
+
+# Initialize log file for debugging
+initialize_log() {
+	mkdir -p "${LOG_FILE%/*}"
+	echo "$(date) $BASENAME: installation process initiated ($PARAMETERS)" >>$LOG_FILE
+}
+
+# Initializes the local network interface variables using the first listed
+# interface; this could be improved later as it might not work as expected on
+# all systems
+initialize_network_variables() {
+	local interface=$(/sbin/ifconfig -a | grep -m 1 'inet ')
+
+	readonly LOCAL_ADDR=$(echo "$interface" | cut -d: -f2 | awk '{ print $1 }')
+	readonly LOCAL_BROADCAST=$(echo "$interface" | cut -d: -f3 | awk '{ print $1 }')
+	readonly LOCAL_NETMASK=$(echo "$interface" | cut -d: -f4 | awk '{ print $1 }')
+	readonly LOCAL_GATEWAY=$(/sbin/ip route | awk '/default/{ print $3 }')
+	readonly LOCAL_NAMESERVER=$(awk '/nameserver/{ print $2 }' /etc/resolv.conf)
+}
+
+# Display a section separator with the provided message
+section_banner() {
+	local border='################################################################'
+	echo -e "\n${border}"
+	echo " $*"
+	echo -e "${border}\n"
+}
+
+# Display a subsection separator with the provided message
+subsection_banner() {
+	echo -e "\n$*"
+	echo -e "${*//?/#}\n"
+}
+
+# Prompt user for database root password...MySQL only for now, will update to
+# include others later
+get_database_creds() {
+	while true; do
+		read -s -p "Desired MySQL Root Password: " MYSQL_PASS
+		echo
+		read -s -p " Verify MySQL Root Password: " MYSQL_PASS2
+		echo
+
+		if [[ $MYSQL_PASS == $MYSQL_PASS2 ]]; then
+			break
+			if [[ -n $MYSQL_PASS ]]; then
+				break
+			else
+				echo -e "Password cannot be empty...try again\n"
+			fi
+		else
+			echo -e "Passwords do not match...try again\n"
+		fi
+	done
+
+	# preseed the password in preparation for package installation
+	cat <<-MYSQL_PRESEED | debconf-set-selections
+	mysql-server-5.1 mysql-server/root_password password $MYSQL_PASS
+	mysql-server-5.1 mysql-server/root_password_again password $MYSQL_PASS
+	mysql-server-5.1 mysql-server/start_on_boot boolean true
+	MYSQL_PRESEED
+}
+
+# Determine whether the provided input is a valid IPv4 address...assumes only
+# dotted quads are valid, rejecting addresses like 127.1
+valid_ipv4() {
+	case "$*" in
+		# reject the following:
+		#   empty strings
+		#   anything other than digits and dots
+		#   anything not ending in a digit
+		""|*[!0-9.]*|*[!0-9]) return 1 ;;
+	esac
+
+	# change IFS to a dot, only for this function
+	local IFS=.
+
+	# split the address into positional parameters
+	set -- $*
+
+	# must be four parameters, each less than 256
+	[[ $# -eq 4 ]] &&
+	[[ $1 -le 255 ]] && [[ $2 -le 255 ]] && [[ $3 -le 255 ]] && [[ $4 -le 255 ]]
+}
+
+# Prompt user for an IP address, validate it, and then assign it to the given
+# variable; a default is offered and required when calling this function
+get_host_ip() {
+	local prompt="$1"
+	local variable="$2"
+	local default="$3"
+
+	while true; do
+		read -e -p "$prompt [$default]: " address
+
+		# default to the local host's IP if none was given
+		address=${address:-$default}
+
+		if valid_ipv4 $address; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$address"
+			break
+		else
+			echo -e "That IP address is invalid...try again\n"
+		fi
+	done
+}
+
+# Prompt user for an IP address range, validate it, and then assign it to the given variable
+get_cidr_range() {
+	local prompt="$1"
+	local variable="$2"
+	local max_prefix=32
+
+	while true; do
+		read -e -p "${prompt}: " range
+		local address=${range%/*}
+		local prefix=${range##*/}
+
+		if valid_ipv4 $address && is_integer "$prefix" "$max_prefix"; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$range"
+			break
+		else
+			echo -e "That IP address range is invalid...try again\n"
+		fi
+	done
+}
+
+# Prompt the user for a number, validate that it is an integer, optionally
+# checking if it's less than or equal to the supplied maximum, and then assign
+# it to the given variable
+get_integer() {
+	local prompt="$1"
+	local variable="$2"
+	# maximum might not be set
+	set +o nounset
+	local maximum="$3"
+	set -o nounset
+
+	while true; do
+		read -e -p "${prompt}: " number
+
+		if is_integer "$number" "$maximum"; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$number"
+			break
+		else
+			if [[ -z $maximum ]]; then
+				echo -e "The input must be an unsigned integer...try again\n"
+			else
+				echo -e "The input must be an unsigned integer and <= $maximum...try again\n"
+			fi
+		fi
+	done
+}
+
+# Prompt the user for input, and do not accept an empty string
+get_input() {
+	local prompt="$1"
+	local variable="$2"
+
+	while true; do
+		read -e -p "${prompt}: "
+
+		if [[ -n $REPLY ]]; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$REPLY"
+			break
+		fi
+	done
+}
+
+is_installed() {
+	local package="$1"
+	dpkg -l $package 2>>$LOG_FILE | grep -q 'ii'
+}
+
+# Install each given package, checking first if it's already installed
+install_packages() {
+	for package in "$@"; do
+		echo -n "Installing package '$package' ... "
+
+		# skip if the package is already installed
+		if is_installed $package; then
+			echo "already installed"
+			continue
+		else
+			apt-get install --quiet --assume-yes $package &>>$LOG_FILE
+		fi
+
+		# report on the success of installation
+		if is_installed $package; then
+			echo "done"
+		else
+			echo "FAILED"
+		fi
+	done
+}
+
+# We need the user to manually bypass the RabbitMQ installation splash screen
+bypass_rabbit_splash() {
+	local package='rabbitmq-server'
+
+	# skip if the package is already installed
+	if ! is_installed $package; then
+		cat <<-EOF
+
+		One last thing...there is currently no way to background/preeseed the
+		RabbitMQ package's installation splash screen, so we'll need you to
+		manually go through it.
+
+		EOF
+		read -s -n 1 -p 'Press any key to continue...'
+		echo -e "\n"
+
+		apt-get install --quiet --assume-yes "rabbitmq-server"
+	fi
 }
 
 
 ##### Main
 
-# read command-line arguments
+# Read command-line arguments
 while [[ $1 == -* ]]; do
 	case "$1" in
 		-h|--help|-\?)
@@ -85,516 +383,151 @@ while [[ $1 == -* ]]; do
 	esac
 done
 
-# This is a Linux check
-if [ `uname -a | grep -i linux | wc -l` -lt 1 ]; then
-	echo "Not Linux, not compatible."
-	exit 1
-fi
+# Saftey measures to fail early before problems snowball
+set -o errexit  # exit if any command in this script has a non-zero exit code
+set -o nounset  # exit if an uninitialized variable is accidentally used
 
-# Compatible OS Check
-DEB_OS=`cat /etc/issue | grep -i 'ubuntu'`
-RH_OS=`cat /etc/issue | grep -i 'centos'`
-if [[ ${#DEB_OS} -gt 0 ]] ; then
-	echo "Valid OS, continuing..."
-	CUR_OS="Ubuntu"
-elif [[ ${#RH_OS} -gt 0 ]] ; then
-	echo "Unsupported OS, sorry!"
-	CUR_OS="CentOS"
-	exit 1
-else
-	echo "Unsupported OS, sorry!"
-	CUR_OS="Unknown"
-	exit 1
-fi
-echo $CUR_OS detected!
+check_safety
+initialize_log
+initialize_network_variables
 
-# Set up log file for debugging
-LOGFILE=/var/log/nova/nova-install.log
-mkdir /var/log/nova
-touch /var/log/nova/nova-install.log
+cat <<-EOF
 
-echo "Nova Cloud Controller install script v1.0"
-echo
-echo "Setting up the Nova cloud controller is a multi-step process.  After you seed information, the script will take over and finish off the install for you. Full log of commands will be availible at /var/log/nova/nova-install.log"
+	Nova Cloud Controller Installation Script v${VERSION}
+
+	Setting up the Nova cloud controller is a multi-step process. After you
+	seed information, the script will take over and finish off the installation
+	for you. A complete log of commands will be availible at $LOG_FILE"
+
+EOF
+read -s -n 1 -p "Press any key to continue..."
 echo
 
-read -p "Press any key to continue..." -n1 -s
-echo
-
-# Setting up sanity check function
-valid_ipv4(){
-	newmember=$(echo $1 | egrep '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$');
-	members=$(echo $newmember | tr "." "\n");
-	memcount=$(echo $newmember | tr "." "\n" | wc -l);
-	if [ $memcount -ne 4 ]; then
-		echo "fail";
-		exit;
-	fi
-	for i in $members; do
-		if [ $i -lt 0 ] || [ $i -gt 255 ]; then
-			echo "fail";
-			exit;
-		fi;
-	done;
-	echo "success";
-}
-
-# Enforcing root user to execute the script
-USER=root
-USER2=`whoami`
-
-if [ $USER != $USER2 ]; then
-	echo "Please run this as the user, 'root'!"; exit 1
-else
-	echo
-fi
-
-echo
-
-echo
-echo "Step 1: Setting up the database."
-# mySQL only for now, will update to include others in next release
-echo
-
-echo "mySQL User Config"
-echo "#################"
-echo
-
-# Setting up mySQL root password, and verify
-while true; do
-	read -s -p "Desired mySQL Password:  " MYSQL_PASS
-	echo "";
-	read -s -p "Verify password: " MYSQL_PASS2
-	echo "";
-
-	if [ $MYSQL_PASS != $MYSQL_PASS2 ]
-	then
-		echo "Passwords do not match...try again.";
-		continue;
-	fi
-	break;
-done
-
-cat <<MYSQL_PRESEED | debconf-set-selections
-mysql-server-5.1 mysql-server/root_password password $MYSQL_PASS
-mysql-server-5.1 mysql-server/root_password_again password $MYSQL_PASS
-mysql-server-5.1 mysql-server/start_on_boot boolean true
-MYSQL_PRESEED
-echo
-
-echo "Step 2: Setting up the controller configuration."
-echo "This includes setting the S3 IP, RabbitMQ IP, Cloud Controller IP, and mySQL host IP"
-
-echo "Nova Cloud Controller Configuration"
-echo "###################################"
-sleep 1
-
-# Configuring S3 Host IP
-set -o nounset
-echo
-
-debug=":"
-debug="echo"
-
-echo
-
-# Grabs the first real IP of ifconfig, and set it as the default entry
-default=`/sbin/ifconfig -a | egrep '.*inet ' | head -n 1|perl -pe 's/.*addr:(.+).*Bcast.*/$1/g' | tr -d " "`
-
-while true; do
-	read -p "S3 Host IP (Default is $default -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		S3_HOST_IP="$t1"
-	else
-		S3_HOST_IP="$default"
-	fi
-	if [ $(valid_ipv4 $S3_HOST_IP) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-echo " S3 Host IP set as \"$S3_HOST_IP\""
-
-# Configuring RabbitMQ IP
-set -o nounset
-echo
-
-debug=":"
-debug="echo"
-
-echo
-
-#default=`/sbin/ifconfig -a | egrep '.*inet ' | head -n 1|perl -pe 's/.*addr:(.+).*Bcast.*/$1/g' | tr -d " "`
-while true; do
-	read -p "RabbitMQ Host IP (Default is $default -- ENTER to accept): " -e t1
-	if [ -n "$t1" ]
-	then
-		RABBIT_IP="$t1"
-	else
-		RABBIT_IP="$default"
-	fi
-
-	if [ $(valid_ipv4 $RABBIT_IP) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-echo " RabbitMQ Host IP set as \"$RABBIT_IP\""
-echo
-echo "There is an issue bypassing the rabbit package splash screen, so installing here and allowing you to proceed.   There is currenly no \
-way to background/preseed this, so it will output to terminal..."
-
-echo
-sleep 5
-apt-get -y install rabbitmq-server
-echo
-
-# Configuring Cloud Controller Host IP
-set -o nounset
-echo
-
-debug=":"
-debug="echo"
-
-echo
-
-#default=`/sbin/ifconfig -a | egrep '.*inet ' | head -n 1|perl -pe 's/.*addr:(.+).*Bcast.*/$1/g' | tr -d " "`
-while true; do
-	read -p "Cloud Controller Host IP (Default is $default -- ENTER to accept): " -e t1
-	if [ -n "$t1" ]
-	then
-		CC_HOST_IP="$t1"
-	else
-		CC_HOST_IP="$default"
-	fi
-
-	if [ $(valid_ipv4 $CC_HOST_IP) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-echo " Cloud Controller Host IP set as \"$CC_HOST_IP\""
-
-# Configuring mySQL Host IP
-set -o nounset
-echo
-
-debug=":"
-debug="echo"
-
-echo
-
-#default=`/sbin/ifconfig -a | egrep '.*inet ' | head -n 1|perl -pe 's/.*addr:(.+).*Bcast.*/$1/g' | tr -d " "`
-while true; do
-	read -p "mySQL Host IP (Default is $default -- ENTER to accept): " -e t1
-	if [ -n "$t1" ]
-	then
-		MYSQL_HOST_IP="$t1"
-	else
-		MYSQL_HOST_IP="$default"
-	fi
-
-	if [ $(valid_ipv4 $MYSQL_HOST_IP) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-echo "mySQL Host IP set as \"$MYSQL_HOST_IP\""
-
-echo
-
-echo "Step 3:  Building the network for your controller."
-
-echo "Here you will set the network range that ALL your projects will reside in.  This is typically \
-a large block such as a /12.  You will also choose how many IPs in this block are availible for use."
-
-echo
-
-echo "Nova Network Setup"
-echo "##################"
-echo
-
-# Set network range and sanity check
-
-while true; do
-	read -p "Controller network range for ALL projects (normally x.x.x.x/12):" FIXED_RANGE
-	IP=$(echo $FIXED_RANGE | awk -F/ '{print $1}');
-	CIDR=$(echo $FIXED_RANGE | awk -F/ '{print $2}' | perl -pe 'if(!($_>=1 && $_<=32)){undef $_;}');
-	if [ $(valid_ipv4 $IP) == "fail" ] || [ -z "$CIDR" ]
-	then
-		echo "You failed at entering a correct range, try again"
-		continue
-	fi;
-
-	break;
-done;
-
-while true; do
-	read -p "Total amount of usable IPs for ALL projects:" NETWORK_SIZE
-	if [ ! "$( echo $NETWORK_SIZE | egrep '^[0-9]{1,9}$' )" ];
-	then echo "Not a valid entry, please try again"
-		continue
-	fi
-	break;
-done;
-
-echo
-
-echo "Step 4:  Creating a project for Nova"
-
-echo "You will choose an admin for the project, and also name the project here. \
-Also, you will build out the network configuration for the project."
-sleep 1
-echo
-
-read -p "Nova project user name:" NOVA_PROJECT_USER
-read -p "Nova project name:" NOVA_PROJECT
-
-while true; do
-	read -p "Desired network + CIDR for project (normally x.x.x.x/24):" PROJECT_CIDR
-	if [ ! "$( echo $PROJECT_CIDR | egrep '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]{1,2}$' )" ];
-	then echo "You failed at entering a correct range, try again"
-		continue
-	fi
-	break;
-done;
-
-while true; do
-	read -p "How many networks for project:" NOVA_NETWORK_NUMBER
-	if [ ! "$( echo $NOVA_NETWORK_NUMBER | egrep '^[0-9]{1,3}$' )" ];
-	then echo "You have not entered a valid network number, try again"
-		continue
-	fi
-	break;
-done;
-
-while true; do
-	read -p "How many availible IPs per project network:" IPS_PER_NETWORK
-	if [ ! "$( echo $IPS_PER_NETWORK | egrep '^[0-9]{1,9}$' )" ];
-	then echo "You have not entered amount of IPs"
-		continue
-	fi
-	break;
-done;
-
-echo
-
-echo "Preparing setup of br100"
-echo "########################"
-echo
-
-# Backup original network file
-cp /etc/network/interfaces /root/interfaces.ORIG
-
-LOCALIP=`/sbin/ifconfig -a | egrep '.*inet ' | head -n 1|perl -pe 's/.*addr:(.+).*Bcast.*/$1/g' | tr -d " "`
-
-while true; do
-	read -p "Please enter your local server IP (Default is $LOCALIP -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		LOCALIP="$t1"
-	else
-		LOCALIP="$LOCALIP"
-	fi
-	if [ $(valid_ipv4 $LOCALIP) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-BROADCAST=`ifconfig -a | egrep '.*inet ' | head -n 1 | perl -pe 's/.*Bcast:(.+).*Mask.*/$1/g' | tr -d " "`
-
-while true; do
-	read -p "Please enter your broadcast IP (Default is $BROADCAST -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		BROADCAST="$t1"
-	else
-		BROADCAST="$BROADCAST"
-	fi
-	if [ $(valid_ipv4 $BROADCAST) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-
-NETMASK=`ifconfig -a | egrep '*inet '| head -n 1 | perl -pe 's/.*Mask:/$1/g'| tr -d " "`
-
-while true; do
-	read -p "Please enter your netmask (Default is $NETMASK -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		NETMASK="$t1"
-	else
-		NETMASK="$NETMASK"
-	fi
-	if [ $(valid_ipv4 $NETMASK) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-
-GATEWAY=`ip route | awk '/default/{print $3}'`
-
-while true; do
-	read -p "Please enter your gateway (Default is $GATEWAY -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		GATEWAY="$t1"
-	else
-		GATEWAY="$GATEWAY"
-	fi
-	if [ $(valid_ipv4 $GATEWAY) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo
-
-NAMESERVER=`cat /etc/resolv.conf| awk '/nameserver/{print $2}'`
-
-while true; do
-	read -p "Please enter your default nameserver (Default is $NAMESERVER -- ENTER to accept):" -e t1
-	if [ -n "$t1" ]
-	then
-		NAMESERVER="$t1"
-	else
-		NAMESERVER="$NAMESERVER"
-	fi
-	if [ $(valid_ipv4 $NAMESERVER) == "fail" ]; then
-		echo "You have entered an invalid IP address, please try again."
-		continue
-	fi
-	break;
-done;
-
-echo "At this point, you've entered all the information needed to finish deployment of your controller!"
-echo
-echo "Feel free to get some coffee, you have earned it!"
-sleep 5
-
-echo
-echo "Entering auto-pilot mode..."
-echo
-
-# Package installation function, and sanity check
-
-echo "Installing packages"
-echo "###################"
-
-install_package() {
-	for packages in $@
-	do
-		printf "%-40s" "Installing package '$packages' ... "
-		if dpkg -l | egrep "^ii.* $packages " &>> $LOGFILE
-		then
-			echo "Already installed";
-			continue;
-		fi
-		apt-get install -y $packages &>> $LOGFILE
-		if dpkg -l | egrep "^ii.* $packages " &>> $LOGFILE
-		then
-			echo "ok";
-		else
-			echo "Failed";
-			#exit -1
-		fi
-	done
-	#return 0;
-}
-
-REQUIRED_PACKAGES="python-software-properties"
-install_package ${REQUIRED_PACKAGES}
-#add-apt-repository ppa:nova-core/ppa &>> $LOGFILE
-add-apt-repository ppa:nova-core/release &>> $LOGFILE
-apt-get update &>> $LOGFILE
-REQUIRED_PACKAGES="python-mysqldb mysql-server nova-api nova-network nova-objectstore nova-scheduler nova-compute unzip vim euca2ools"
-#REQUIRED_PACKAGES="mysql-server bzr nova-common nova-doc python-mysqldb python-greenlet python-nova nova-api nova-network nova-objectstore nova-scheduler nova-compute unzip vim euca2ools dnsmasq open-iscsi kpartx kvm gawk iptables ebtables user-mode-linux kvm libvirt-bin screen iscsitarget euca2ools vlan curl python-twisted python-sqlalchemy python-mox python-greenlet python-carrot python-daemon python-eventlet python-gflags python-libvirt python-libxml2 python-routes"
-install_package ${REQUIRED_PACKAGES}
-
-echo "Finalizing mySQL setup"
-echo "######################"
-echo
-
-sed -i 's/127.0.0.1/0.0.0.0/g' /etc/mysql/my.cnf
-service mysql restart &>> $LOGFILE
-echo
-
-mysql -uroot -p$MYSQL_PASS -e "CREATE DATABASE nova;"
-mysql -uroot -p$MYSQL_PASS -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
-mysql -uroot -p$MYSQL_PASS -e "SET PASSWORD FOR 'root'@'%' = PASSWORD('$MYSQL_PASS');"
-echo "...done..."
-echo
-
-echo "Setting up Nova configuration files"
-echo "###################################"
-
-# Passing info into config files
-cat >> /etc/nova/nova.conf << NOVA_CONF_EOF
---s3_host=$S3_HOST_IP
---rabbit_host=$RABBIT_IP
---cc_host=$CC_HOST_IP
---ec2_url=http://$S3_HOST_IP:8773/services/Cloud
---fixed_range=$FIXED_RANGE
---network_size=$NETWORK_SIZE
---FAKE_subdomain=ec2
---routing_source_ip=$CC_HOST_IP
---verbose
---sql_connection=mysql://root:$MYSQL_PASS@$MYSQL_HOST_IP/nova
---network_manager=nova.network.manager.FlatManager
+
+### STEP 1
+section_banner 'Database Credentials'
+get_database_creds
+
+
+### STEP 2
+section_banner 'Nova Cloud Controller Configuration'
+cat <<-EOF
+	This section includes setting the S3, RabbitMQ, Cloud Controller, and MySQL
+	host IP addresses
+
+EOF
+get_host_ip 'S3 host IP address' S3_HOST_IP $LOCAL_ADDR
+get_host_ip 'RabbitMQ host IP address' RABBIT_HOST_IP $LOCAL_ADDR
+get_host_ip 'Cloud Controller host IP address' CC_HOST_IP $LOCAL_ADDR
+get_host_ip 'MySQL host IP address' MYSQL_HOST_IP $LOCAL_ADDR
+
+
+### STEP 3
+section_banner 'Building the Network for Your Controller'
+cat <<-EOF
+	Here you will set the network range that ALL your projects will reside in.
+	This is typically a large block such as a /12. You will also choose how
+	many IPs in this block are availible for use.
+
+EOF
+get_cidr_range 'Controller network range for ALL projects (normally x.x.x.x/12)' FIXED_RANGE
+get_integer 'Total amount of usable IPs for ALL projects' NETWORK_SIZE 999999999
+
+
+### STEP 4
+section_banner 'Creating a Project for Nova'
+cat <<-EOF
+	You will create a project administrator and a name for the project. Also,
+	you will build out the network configuration for this project.
+
+EOF
+get_input 'Nova project user name' NOVA_PROJECT_USER
+get_input 'Nova project name' NOVA_PROJECT
+get_cidr_range "Desired network range for $NOVA_PROJECT project (normally x.x.x.x/24)" PROJECT_CIDR
+get_integer 'How many networks for project' NOVA_NETWORK_NUMBER 999
+get_integer 'How many available IPs per project network' IPS_PER_NETWORK 999999999
+
+subsection_banner 'Preparing setup of br100'
+
+get_host_ip "Enter your network interface's IP address" SERVER_IP $LOCAL_ADDR
+get_host_ip "Enter your network interface's broadcast address" BROADCAST $LOCAL_BROADCAST
+get_host_ip "Enter your network interface's netmask" NETMASK $LOCAL_NETMASK
+get_host_ip "Enter your network interface's gateway" GATEWAY $LOCAL_GATEWAY
+get_host_ip "Enter the IP address of your network's nameserver" NAMESERVER $LOCAL_NAMESERVER
+
+bypass_rabbit_splash
+
+
+### STEP 5
+section_banner 'ENTERING AUTO-PILOT MODE'
+cat <<-EOF
+	At this point, you've entered all the information needed to finish
+	deployment of your controller! Feel free to get some coffee, you have
+	earned it!
+EOF
+sleep 4
+
+subsection_banner 'Installing packages'
+
+install_packages 'python-software-properties'
+echo -n "Adding '$PPA' repository ... "
+add-apt-repository ppa:nova-core/release &>>$LOG_FILE
+apt-get update &>>$LOG_FILE
+echo 'done'
+install_packages $REQUIRED_PACKAGES
+
+subsection_banner 'Finalizing MySQL Setup'
+
+echo -n 'Adjusting MySQL network configuration ... '
+sed -i'.bak' 's/127.0.0.1/0.0.0.0/g' /etc/mysql/my.cnf
+service mysql restart &>>$LOG_FILE
+echo 'done'
+
+echo -n 'Creating database ... '
+mysql --user='root' --password="$MYSQL_PASS" --execute "CREATE DATABASE nova;"
+mysql --user='root' --password="$MYSQL_PASS" --execute "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
+mysql --user='root' --password="$MYSQL_PASS" --execute "SET PASSWORD FOR 'root'@'%' = PASSWORD('$MYSQL_PASS');"
+echo 'done'
+
+subsection_banner 'Setting up Nova configuration and credentials'
+
+echo -n 'Generating nova.conf ... '
+cat >> /etc/nova/nova.conf <<-NOVA_CONF_EOF
+	--s3_host=$S3_HOST_IP
+	--rabbit_host=$RABBIT_HOST_IP
+	--cc_host=$CC_HOST_IP
+	--ec2_url=http://$S3_HOST_IP:8773/services/Cloud
+	--fixed_range=$FIXED_RANGE
+	--network_size=$NETWORK_SIZE
+	--FAKE_subdomain=ec2
+	--routing_source_ip=$CC_HOST_IP
+	--verbose
+	--sql_connection=mysql://root:$MYSQL_PASS@$MYSQL_HOST_IP/nova
+	--network_manager=nova.network.manager.FlatManager
 NOVA_CONF_EOF
+echo 'done'
 
-echo "Initializing database"
-nova-manage db sync &>> $LOGFILE
+echo -n 'Initializing database ... '
+nova-manage db sync &>>$LOG_FILE
 sleep 1
-echo "...done..."
-echo
+/usr/bin/python /usr/bin/nova-manage user admin $NOVA_PROJECT_USER &>>$LOG_FILE
+/usr/bin/python /usr/bin/nova-manage project create $NOVA_PROJECT $NOVA_PROJECT_USER &>>$LOG_FILE
+/usr/bin/python /usr/bin/nova-manage network create $PROJECT_CIDR $NOVA_NETWORK_NUMBER $IPS_PER_NETWORK &>>$LOG_FILE
+echo 'done'
 
-/usr/bin/python /usr/bin/nova-manage user admin $NOVA_PROJECT_USER &>> $LOGFILE
-/usr/bin/python /usr/bin/nova-manage project create $NOVA_PROJECT $NOVA_PROJECT_USER &>> $LOGFILE
-/usr/bin/python /usr/bin/nova-manage network create $PROJECT_CIDR $NOVA_NETWORK_NUMBER $IPS_PER_NETWORK &>> $LOGFILE
-echo "...done..."
-
-echo
-echo "Generating Nova credentials"
-echo "###########################"
-
+echo -n 'Generating Nova credentials ... '
 mkdir -p /root/creds
-/usr/bin/python /usr/bin/nova-manage project zipfile $NOVA_PROJECT $NOVA_PROJECT_USER /root/creds/novacreds.zip &>> $LOGFILE
+/usr/bin/python /usr/bin/nova-manage project zipfile $NOVA_PROJECT $NOVA_PROJECT_USER /root/creds/novacreds.zip &>>$LOG_FILE
 sleep 3
-unzip -d /root/creds /root/creds/novacreds.zip &>> $LOGFILE
-. /root/creds/novarc
+unzip -d /root/creds /root/creds/novacreds.zip &>>$LOG_FILE
+source /root/creds/novarc
 cat /root/creds/novarc >> ~/.bashrc
-sed -i.bak "s/127.0.0.1/$CC_HOST_IP/g" /root/creds/novarc
-echo "...done..."
-echo
+sed -i'.bak' "s/127.0.0.1/$CC_HOST_IP/g" /root/creds/novarc
+echo 'done'
 
-echo "Creating br100 bridge device"
-echo "############################"
-echo
+echo -n 'Updating network interfaces ... '
+# Backup original network file
+[[ ! -f /etc/network/interaces.bak ]] && cp /etc/network/interfaces{,.bak}
 
 cat > /etc/network/interfaces << NOVA_BR100_CONFIG_EOF
 # The loopback network interface
@@ -607,64 +540,70 @@ iface br100 inet static
 	bridge_stp off
 	bridge_maxwait 0
 	bridge_fd 0
-	address $LOCALIP
+	address $SERVER_IP
 	netmask $NETMASK
 	broadcast $BROADCAST
 	gateway $GATEWAY
 	dns-nameservers $NAMESERVER
 NOVA_BR100_CONFIG_EOF
-echo "...done..."
-echo
+echo 'done'
 
-echo "Restarting networking"
-/etc/init.d/networking restart
-echo "...done..."
-echo
+echo -n 'Restarting networking service ... '
+# don't know why `service networking restart` fails here
+/etc/init.d/networking restart &>>$LOG_FILE
+echo 'done'
 
-echo "#################NOTE#####NOTE#####NOTE#####NOTE#####NOTE#####NOTE#################"
-echo "#Be sure to source your credential file into your environment after config changes#"
-echo "###########################e.g. source /root/creds/novarc##########################"
-sleep 1
-echo
+echo -n 'Restarting all Nova services ... '
+source /root/creds/novarc
 
-# Sourcing creds file and restarting all Nova services
-. /root/creds/novarc
-sleep 1
-# 21Jan2011 - Init scripts updated to use upstart
-restart libvirt-bin &>> $LOGFILE; restart nova-network &>> $LOGFILE; restart nova-compute &>> $LOGFILE; restart nova-api &>> $LOGFILE; restart nova-objectstore &>> $LOGFILE; restart nova-scheduler &>> $LOGFILE
-#restart libvirt-bin &>> $LOGFILE; service nova-api restart &>> $LOGFILE; service nova-scheduler restart &>> $LOGFILE; service nova-network restart &>> $LOGFILE; service nova-objectstore restart &>> $LOGFILE; service nova-compute restart &>> $LOGFILE
+restart libvirt-bin &>>$LOG_FILE
+restart nova-network &>>$LOG_FILE
+restart nova-compute &>>$LOG_FILE
+restart nova-api &>>$LOG_FILE
+restart nova-objectstore &>>$LOG_FILE
+restart nova-scheduler &>>$LOG_FILE
+echo 'done'
 
-echo "Ensure all five Nova services are running"
-echo "#########################################"
-ps aux | grep -i nova
-sleep 5
+subsection_banner 'Ensure all five Nova services are running'
 
-echo "Setup default ICMP and SSH access to your future VMs"
-echo "####################################################"
+ps -u nova -F c | grep -v 'su'
+sleep 4
 
-echo "Allowing ping and SSH to your running instances"
-euca-authorize -P icmp -t -1:-1 default &>> $LOGFILE
-euca-authorize -P tcp -p 22 default &>> $LOGFILE
-echo "...done..."
+echo -n -e "\nAllowing ICMP and SSH access to all VMs ... "
+euca-authorize -P icmp -t -1:-1 default &>>$LOG_FILE
+euca-authorize -P tcp -p 22 default &>>$LOG_FILE
+echo 'done'
 
-echo "######################################################################"
-echo "#You /MUST/ re-source your 'novarc' to use the API commands since the#"
-echo "##script cannot pass the source information out of it's own process###"
-echo "######################################################################"
-echo
+cat <<-EOF
 
-# Only one dnsmasq process starts, supposed to two running at different priorities.  This fixes that...possible bug.
+	########################################################################
+	# You /MUST/ re-source your 'novarc' to use the API commands since the #
+	# script cannot pass the source information out of it's own process    #
+	################## e.g. source /root/creds/novarc ######################
+
+EOF
+
+# Only one dnsmasq process starts, supposed to be two running at different
+# priorities. This fixes that...possible bug?
 killall dnsmasq
-service nova-network restart &>> $LOGFILE
+service nova-network restart &>>$LOG_FILE
 
-# Needed for KVM to initialize, VMs run in qemu mode otherwise and is very slow
-chgrp kvm /dev/kvm
-chmod g+rwx /dev/kvm
-echo
-echo 'The next thing you are going to want to do it get a VM to test with.  You can find a test VM how-to, and read more about custom image creation at "http://nova.openstack.org/adminguide/multi.node.install.html" and "http://wiki.openstack.org/GettingImages'
-echo
-echo 'Enjoy your new private cloud!'
+# Ensure proper initialization of KVM if it's available;
+# otherwise VMs run in the much slower QEMU mode
+if [[ -f /dev/kvm ]]; then
+	chgrp kvm /dev/kvm
+	chmod g+rwx /dev/kvm
+fi
 
+cat <<-EOF
+	The next thing you are going to want to do it get a VM to test with.
+	You can find a test VM how-to and read about custom image creation here:
 
-# If you run into any problems, please feel free to contact the script maintainers.
-# You can also get assistance by stopping by irc.freenode.net - #openstack, sending a message to the OpenStack Users maillist - #openstack@lists.launchpad.net, or posting at "https://answers.launchpad.net/openstack"
+	    http://nova.openstack.org/adminguide/multi.node.install.html
+	    http://wiki.openstack.org/GettingImages
+
+	Enjoy your new private cloud!
+
+EOF
+
+exit $EX_OK
