@@ -1,0 +1,803 @@
+#!/bin/bash
+
+# Copyright (c) 2010-2011 OpenStack, LLC.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# nova-install -- configure a fully functioning OpenStack Nova component
+
+# This script is intended to be ran on a fresh install on Ubuntu 10.04 64-bit.
+# Once ran with the appropiate variables, it will produce a fully functioning
+# Nova Cloud Contoller or Nova Compute Node. Eventually other Ubuntu releases,
+# as well as RPM-based distributions, will be supported.
+
+# Written by Wayne A. Walls (dubsquared) with the amazing help of Jordan Rinke
+# (JordanRinke), Vish Ishaya (vishy), Aaron Bull Schaefer (elasticdog), and
+# a lot of input from the fine folks in #openstack on irc.freenode.net!
+
+# Please contact script maintainers for questions, comments, or concerns:
+#   Wayne  -> wayne@openstack.org
+#   Jordan -> jordan@openstack.org
+
+# You can also get assistance by stopping by irc.freenode.net - #openstack,
+# sending a message to the OpenStack mailing list - openstack@lists.launchpad.net,
+# or posting at https://answers.launchpad.net/openstack
+
+
+##### Constants
+
+readonly VERSION=1.2  # release version of this script
+
+readonly BASENAME="${0##*/}"                   # name of this script for error output
+readonly LOG_FILE='/var/log/nova/install.log'  # location of script log file
+readonly PARAMETERS="$*"                       # all of the specified input parameters
+readonly PPA='ppa:nova-core/release'           # which ppa to install packages from
+readonly ROOT_UID=0                            # users with $UID 0 have root privileges
+
+# Exit codes
+readonly EX_OK=0       # successful termination
+readonly EX_USAGE=64   # command line usage error
+readonly EX_OSFILE=72  # critical OS file missing
+readonly EX_NOPERM=77  # permission denied
+
+
+##### Helper Functions
+
+# Print message to stderr and exit with the given status code, if one was supplied
+error_exit() {
+	local message="$1"
+	local status="$2"
+	local max_status=255  # highest legal status code
+
+	echo "ERROR: $message" 1>&2
+
+	if is_integer "$status" "$max_status"; then
+		exit $status
+	else
+		exit 1
+	fi
+}
+
+# Prompt user for an IP address range, validate it, and then assign it to the given variable
+get_cidr_range() {
+	local prompt="$1"
+	local variable="$2"
+	local max_prefix=32  # only 32 bits in an address
+
+	while true; do
+		read -e -p "${prompt}: " range
+		local address=${range%/*}
+		local prefix=${range##*/}
+
+		if is_valid_ipv4 $address && is_integer "$prefix" "$max_prefix"; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$range"
+			break
+		else
+			echo -e "That IP address range is invalid...try again\n"
+		fi
+	done
+}
+
+# Prompt user for an IP address, validate it, and then assign it to the given
+# variable; a default is offered and required when calling this function
+get_host_ip() {
+	local prompt="$1"
+	local variable="$2"
+	local default="$3"
+
+	while true; do
+		read -e -p "$prompt [$default]: " address
+
+		# fall back to the default IP if none was input by user
+		address=${address:-$default}
+
+		if is_valid_ipv4 $address; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$address"
+			break
+		else
+			echo -e "That IP address is invalid...try again\n"
+		fi
+	done
+}
+
+# Prompt user for input, and do not accept an empty string
+get_input() {
+	local prompt="$1"
+	local variable="$2"
+
+	while true; do
+		read -e -p "$prompt: "
+
+		if [[ -n $REPLY ]]; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$REPLY"
+			break
+		fi
+	done
+}
+
+# Prompt user for a number, validate that it is an integer, optionally checking
+# if it's less than or equal to the supplied maximum, and then assign it to the
+# given variable
+get_integer() {
+	local prompt="$1"
+	local variable="$2"
+	# maximum might not be set
+	set +o nounset
+	local maximum="$3"
+	set -o nounset
+
+	while true; do
+		read -e -p "$prompt: " number
+
+		if is_integer "$number" "$maximum"; then
+			# much safer than assigning with eval
+			printf -v $variable %s "$number"
+			break
+		else
+			if [[ -z $maximum ]]; then
+				echo -e "The input must be an unsigned integer...try again\n"
+			else
+				echo -e "The input must be an unsigned integer and <= $maximum...try again\n"
+			fi
+		fi
+	done
+}
+
+# Install each given package, checking first if it's already installed
+install_packages() {
+	for package in "$@"; do
+		echo -n "Installing package '$package' ... "
+
+		# skip if the package is already installed
+		if is_installed $package; then
+			echo 'already installed'
+			continue
+		else
+			apt-get install --quiet --assume-yes $package &>>$LOG_FILE
+			echo 'done'
+		fi
+	done
+}
+
+# Return whether or not the provided input is an integer, and optionally, less
+# than or equal to the given maximum
+is_integer() {
+	local input="$1"
+	# maximum might not be set
+	set +o nounset
+	local maximum="$2"
+	set -o nounset
+
+	case "$input" in
+		# reject the following:
+		#   empty strings
+		#   anything other than digits
+		""|*[!0-9]*) return 1 ;;
+	esac
+
+	if [[ -n $maximum ]]; then
+		(( $input <= $maximum ))
+	fi
+}
+
+# Return whether or not the given package is already installed on the system
+is_installed() {
+	local package="$1"
+	dpkg -l $package 2>>$LOG_FILE | grep -q 'ii'
+}
+
+# Return whether or not the provided component is supported by the script
+is_supported_component() {
+	local component="$1"
+	case "$component" in
+		cloud|compute) ;;
+		*) return 1 ;;
+	esac
+}
+
+# Return whether or not the provided input is a valid IPv4 address...assumes
+# only dotted quads are valid, rejecting addresses like 127.1
+is_valid_ipv4() {
+	local input="$1"
+
+	case "$input" in
+		# reject the following:
+		#   empty strings
+		#   anything other than digits and dots
+		#   anything not ending in a digit
+		""|*[!0-9.]*|*[!0-9]) return 1 ;;
+	esac
+
+	# change IFS to a dot, only for this function
+	local IFS=.
+
+	# split the address into positional parameters
+	set -- $*
+
+	# there must be four parameters, each less than or equal to 255
+	(( $# == 4 )) &&
+	(( $1 <= 255 )) && (( $2 <= 255 )) && (( $3 <= 255 )) && (( $4 <= 255 ))
+}
+
+# Display a section separator with the provided message
+section_banner() {
+	local border='################################################################'
+	echo -e "\n${border}"
+	echo " $*"
+	echo -e "${border}\n"
+}
+
+# Display the script's help message
+show_help() {
+	cat <<-EOF
+
+	NAME
+	     $BASENAME -- configure a fully functioning OpenStack Nova component
+
+	SYNOPSIS
+	     $BASENAME [-t type] [-V] [-h]
+
+	DESCRIPTION
+	     The $BASENAME command will gather information, install dependencies,
+	     and then configure one of a number of different OpenStack component
+	     types as specified on the command line.
+
+	     A cloud controller will be configured to run all five Nova services
+	     (api, compute, network, objectstor, and scheduler), while a compute
+	     node will only run Nova's compute service.
+
+	OPTIONS
+	     -t, --type <type>
+	          Changes the type of component to install. Currently implemented
+	          types are 'cloud' (default) for installing a new cloud
+	          controller, and 'compute' for installing a compute node for an
+	          existing cloud.
+
+	     -V, --version
+	          Print the $BASENAME script's version information and exit.
+
+	     -h, --help
+	          View this help message about the available command-line options.
+
+	EOF
+}
+
+# Display a subsection separator with the provided message
+subsection_banner() {
+	echo -e "\n$*"
+	echo -e "${*//?/#}\n"
+}
+
+
+##### Workflow Functions
+
+# Ensure user has root privileges and that we're on a supported linux box
+check_safety() {
+	# root check
+	if (( $UID != $ROOT_UID )); then
+		error_exit 'Permission denied - you must have root privileges to run this script' $EX_NOPERM
+	fi
+
+	# linux check
+	if [[ $OSTYPE != linux* ]]; then
+		error_exit 'Not compatible - you must run this script on a Linux system' $EX_OSFILE
+	fi
+
+	# distribution check
+	if [[ -f /etc/lsb-release ]]; then
+		distro='ubuntu'
+	else
+		error_exit 'Not compatible - this script only supports Ubuntu at this time' $EX_OSFILE
+	fi
+}
+
+# Initialize package dependencies based on OS and component type
+initialize_dependencies() {
+	case "$component_type" in
+		cloud)
+			required_packages="
+				euca2ools
+				mysql-server
+				nova-api
+				nova-compute
+				nova-network
+				nova-objectstore
+				nova-scheduler
+				python-mysqldb
+				unzip
+				vim
+			"
+			;;
+		compute)
+			required_packages="
+				nova-compute
+				python-mysqldb
+			"
+			;;
+	esac
+}
+
+# Initializes the local network interface variables using the first listed
+# interface; this could be improved later as it might not work as expected on
+# all systems
+initialize_network_variables() {
+	local interface=$(/sbin/ifconfig -a | grep -m 1 'inet ')
+
+	local_address=$(echo "$interface" | cut -d: -f2 | awk '{ print $1 }')
+	local_broadcast=$(echo "$interface" | cut -d: -f3 | awk '{ print $1 }')
+	local_netmask=$(echo "$interface" | cut -d: -f4 | awk '{ print $1 }')
+	local_gateway=$(/sbin/ip route | awk '/default/{ print $3 }')
+	local_nameserver=$(awk '/nameserver/{ print $2 }' /etc/resolv.conf)
+}
+
+# Create the log file (if necessary) and append a timestamp
+start_log() {
+	mkdir -p "${LOG_FILE%/*}"
+	echo "$(date) $BASENAME: installation process initiated ($PARAMETERS)" >>$LOG_FILE
+}
+
+# Display installer introduction
+show_intro() {
+	local wording
+	if [[ $component_type == cloud ]]; then
+		wording='Cloud Controller'
+	elif [[ $component_type == compute ]]; then
+		wording="Compute Node"
+	fi
+
+	cat <<-EOF
+
+		Nova Installation Script v${VERSION}
+
+		Setting up a Nova $wording is a multi-step process. After you seed
+		information, the script will take over and finish off the installation for you.
+		A complete log of commands will be availible at $LOG_FILE
+
+	EOF
+	read -s -n 1 -p 'Press any key to continue...'
+	echo
+}
+
+# Prompt user for host IPs for various Nova services
+get_service_hosts() {
+	section_banner 'Nova Services Configuration'
+
+	cat <<-EOF
+		This section includes setting the host IP addresses for the Nova Cloud
+		Controller, S3, RabbitMQ, and MySQL services...these are typically hosted on
+		the same machine.
+
+	EOF
+	get_host_ip 'Cloud Controller host IP address' cc_host_ip $local_address
+	get_host_ip 'S3 host IP address' s3_host_ip $cc_host_ip
+	get_host_ip 'RabbitMQ host IP address' rabbit_host_ip $cc_host_ip
+	get_host_ip 'MySQL host IP address' mysql_host_ip $cc_host_ip
+}
+
+# Prompt user for database root password...MySQL only for now, will update to
+# include others later
+get_database_creds() {
+	local wording
+	if [[ $component_type == cloud ]]; then
+		wording='Desired'
+	else
+		wording="The Cloud Controller's"
+	fi
+
+	subsection_banner 'Database credentials'
+
+	while true; do
+		local mysql_pass2
+		read -s -p "$wording MySQL root password: " mysql_pass
+		echo
+		read -s -p 'Verify MySQL root password: ' mysql_pass2
+		echo
+
+		if [[ $mysql_pass == $mysql_pass2 ]]; then
+			if [[ -n $mysql_pass ]]; then
+				break
+			else
+				echo -e "Password cannot be empty...try again\n"
+			fi
+		else
+			echo -e "Passwords do not match...try again\n"
+		fi
+	done
+
+	if [[ $component_type == cloud ]]; then
+		# preseed the password in preparation for package installation
+		cat <<-MYSQL_PRESEED | debconf-set-selections
+			mysql-server-5.1 mysql-server/root_password password $mysql_pass
+			mysql-server-5.1 mysql-server/root_password_again password $mysql_pass
+			mysql-server-5.1 mysql-server/start_on_boot boolean true
+		MYSQL_PRESEED
+	fi
+}
+
+# Prompt user for the local machine's network interface settings
+get_bridge_info() {
+	section_banner 'Local Network Settings'
+
+	cat <<-EOF
+		In order to set up the network bridge, we'll need some information on your
+		local network interface configuration. The settings will default to the first
+		known device as listed by 'ifconfig'.
+
+	EOF
+
+	get_host_ip "Enter this machine's IP address" bridge_address $local_address
+	get_host_ip "Enter this machine's broadcast address" bridge_broadcast $local_broadcast
+	get_host_ip "Enter this machine's netmask" bridge_netmask $local_netmask
+	get_host_ip "Enter this machine's gateway" bridge_gateway $local_gateway
+	get_host_ip "Enter this machine's DNS nameserver address" bridge_nameserver $local_nameserver
+}
+
+# Prompt user for desired project network configuration
+get_project_info() {
+	section_banner 'Project Network Configuration'
+
+	cat <<-EOF
+		Here you will set the network range that ALL of your projects will reside in,
+		and the number of IP addresses in that block that should be available for use.
+		After that, you'll create a project administrator and a new project.
+
+	EOF
+	get_cidr_range 'Network range for ALL projects (normally x.x.x.x/12)' fixed_range
+	get_integer 'Total amount of usable IPs for ALL projects' network_size 999999999
+
+	subsection_banner 'New project creation'
+
+	get_input 'User name for the project administrator' project_user
+	get_input 'Name for the project' project_name
+	echo
+	get_cidr_range "Desired network range for the '$project_name' project (normally x.x.x.x/24)" project_cidr
+	get_integer "How many networks for the '$project_name' project" project_network_count 999
+	get_integer "How many available IPs per '$project_name' project network" project_ips_per_network 999999999
+}
+
+# We need the user to manually bypass the RabbitMQ installation splash screen
+bypass_rabbit_splash() {
+	local package='rabbitmq-server'
+
+	# skip if the package is already installed
+	if ! is_installed $package; then
+		cat <<-EOF
+
+		########
+
+		One last thing...there is currently no way to background/preeseed the
+		RabbitMQ package's installation splash screen, so we'll need you to
+		manually go through it.
+
+		EOF
+		read -s -n 1 -p 'Press any key to continue...'
+		echo -e "\n"
+
+		apt-get install --quiet --assume-yes "$package"
+	fi
+}
+
+# Display auto-pilot notice
+show_auto_pilot() {
+	section_banner 'ENTERING AUTO-PILOT MODE'
+
+	cat <<-EOF
+		At this point, you've entered all the information needed to finish the
+		installation of this Nova component. Feel free to get some coffee, you have
+		earned it!
+	EOF
+	sleep 4
+}
+
+# Install all required packages
+install_dependencies() {
+	subsection_banner 'Installing packages'
+
+	install_packages 'python-software-properties'
+	echo -n "Adding '$PPA' repository ... "
+	add-apt-repository ppa:nova-core/release &>>$LOG_FILE
+	apt-get update &>>$LOG_FILE
+	echo 'done'
+	install_packages $required_packages
+}
+
+# Create nova.conf file, initialize the database, and generate user credentials
+setup_nova_config() {
+	subsection_banner 'Setting up the Nova configuration file'
+
+	echo -n 'Generating nova.conf ... '
+	if [[ $component_type == cloud ]]; then
+		cat >> /etc/nova/nova.conf <<-EOF
+			--s3_host=$s3_host_ip
+			--rabbit_host=$rabbit_host_ip
+			--cc_host=$cc_host_ip
+			--ec2_url=http://$s3_host_ip:8773/services/Cloud
+			--fixed_range=$fixed_range
+			--network_size=$network_size
+			--FAKE_subdomain=ec2
+			--routing_source_ip=$cc_host_ip
+			--verbose
+			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
+			--network_manager=nova.network.manager.FlatManager
+		EOF
+	else
+		cat >> /etc/nova/nova.conf <<-EOF
+			--s3_host=$s3_host_ip
+			--rabbit_host=$rabbit_host_ip
+			--cc_host=$cc_host_ip
+			--ec2_url=http://$s3_host_ip:8773/services/Cloud
+			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
+			--network_manager=nova.network.manager.FlatManager
+		EOF
+	fi
+	echo 'done'
+}
+
+# Create a new database and initialize it with the project information
+finalize_database() {
+	local mysql_config='/etc/mysql/my.cnf'
+
+	subsection_banner 'Finalizing MySQL setup'
+
+	echo -n 'Adjusting MySQL network configuration ... '
+	# back up original my.cnf file
+	[[ ! -f $mysql_config.bak ]] && cp $mysql_config{,.bak}
+	sed -i 's/127.0.0.1/0.0.0.0/g' $mysql_config
+	service mysql restart &>>$LOG_FILE
+	echo 'done'
+
+	echo -n 'Creating database ... '
+	mysql --user='root' --password="$mysql_pass" --execute "CREATE DATABASE nova;"
+	mysql --user='root' --password="$mysql_pass" --execute "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
+	mysql --user='root' --password="$mysql_pass" --execute "SET PASSWORD FOR 'root'@'%' = PASSWORD('$mysql_pass');"
+	echo 'done'
+
+	echo -n 'Initializing database ... '
+	nova-manage db sync &>>$LOG_FILE
+	sleep 1
+	/usr/bin/python /usr/bin/nova-manage user admin $project_user &>>$LOG_FILE
+	/usr/bin/python /usr/bin/nova-manage project create $project_name $project_user &>>$LOG_FILE
+	/usr/bin/python /usr/bin/nova-manage network create $project_cidr $project_network_count $project_ips_per_network &>>$LOG_FILE
+	echo 'done'
+}
+
+# Generate user credentials and environment settings
+generate_credentials() {
+	local creds_dir='/root/creds'
+	local novacreds="${creds_dir}/novacreds.zip"
+	local novarc="${creds_dir}/novarc"
+
+	subsection_banner 'Generate Nova user credentials'
+
+	echo -n 'Generating and extracting novacreds.zip ... '
+	mkdir -p $creds_dir
+	/usr/bin/python /usr/bin/nova-manage project zipfile $project_name $project_user $novacreds &>>$LOG_FILE
+	sleep 3
+	unzip -d $creds_dir $novacreds &>>$LOG_FILE
+	echo 'done'
+
+	echo -n 'Appending novarc environment settings to your ~/.bashrc ... '
+	source $novarc
+	cat $novarc >> $HOME/.bashrc
+	# back up original novarc file
+	[[ ! -f $novarc.bak ]] && cp $novarc{,.bak}
+	sed -i "s/127.0.0.1/$cc_host_ip/g" $novarc
+	echo 'done'
+}
+
+# Use a bridged network interface and adjust firewall if necessary
+configure_network() {
+	subsection_banner 'Updating network interfaces'
+
+	echo -n 'Adding bridge device ... '
+	# back up original interfaces file
+	[[ ! -f /etc/network/interaces.bak ]] && cp /etc/network/interfaces{,.bak}
+
+	cat > /etc/network/interfaces << EOF
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto br100
+iface br100 inet static
+	bridge_ports eth0
+	bridge_stp off
+	bridge_maxwait 0
+	bridge_fd 0
+	address $bridge_address
+	netmask $bridge_netmask
+	broadcast $bridge_broadcast
+	gateway $bridge_gateway
+	dns-nameservers $bridge_nameserver
+EOF
+	echo 'done'
+
+	echo -n 'Restarting networking service ... '
+	/etc/init.d/networking restart &>>$LOG_FILE
+	echo 'done'
+
+	# any server that does /NOT/ have nova-api running on it will need this
+	# firewall rule for UEC images to be able to fetch metadata info
+	if [[ $component_type != cloud ]]; then
+		echo -n 'Allowing image metadata traffic ... '
+		iptables -t nat -A PREROUTING -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination $cc_host_ip:8773
+		echo 'done'
+	fi
+}
+
+# Start bring services back up with the new configurations
+restart_services() {
+	subsection_banner 'Bringing your Nova node online'
+
+	echo -n 'Restarting Nova services ... '
+	if [[ $component_type == cloud ]]; then
+		source /root/creds/novarc
+		restart libvirt-bin &>>$LOG_FILE
+		restart nova-network &>>$LOG_FILE
+		restart nova-compute &>>$LOG_FILE
+		restart nova-api &>>$LOG_FILE
+		restart nova-objectstore &>>$LOG_FILE
+		restart nova-scheduler &>>$LOG_FILE
+	else
+		restart libvirt-bin &>>$LOG_FILE
+		restart nova-compute &>>$LOG_FILE
+	fi
+	echo 'done'
+
+	if [[ $component_type == cloud ]]; then
+		echo -e 'Ensure all five Nova services are running:\n'
+	else
+		echo -e 'Ensure the Nova compute service is running:\n'
+	fi
+	ps -u nova -F c | grep -v 'su'
+	sleep 4
+}
+
+# Ensure proper initialization of KVM if it's available;
+# otherwise VMs run in the much slower QEMU mode
+fix_kvm_permissions() {
+	if [[ -f /dev/kvm ]]; then
+		chgrp kvm /dev/kvm
+		chmod g+rwx /dev/kvm
+	fi
+}
+
+# Authorize ICMP and SSH traffic between VMs by default
+allow_ping_and_ssh() {
+	echo -n -e "\nAllowing ICMP and SSH access to all VMs ... "
+	euca-authorize -P icmp -t -1:-1 default &>>$LOG_FILE
+	euca-authorize -P tcp -p 22 default &>>$LOG_FILE
+	echo 'done'
+}
+
+# Only one dnsmasq process starts, supposed to be two running at different
+# priorities. This fixes that...possible bug?
+fix_dnsmasq_bug() {
+	killall dnsmasq
+	service nova-network restart &>>$LOG_FILE
+}
+
+# Display closing message after a successful installation
+show_closing() {
+	if [[ $component_type == cloud ]]; then
+		cat <<-EOF
+
+
+		########################################################################
+		# You /MUST/ re-source your 'novarc' to use the API commands since the #
+		# script cannot pass the source information out of it's own process    #
+		################## e.g. source /root/creds/novarc ######################
+
+		The next thing you are going to want to do it get a VM to test with.
+		You can find a test VM how-to and read about custom image creation here:
+
+		  http://nova.openstack.org/adminguide/multi.node.install.html
+		  http://wiki.openstack.org/GettingImages
+
+		Enjoy your new private cloud!
+
+		EOF
+	else
+		cat <<-EOF
+
+
+		########
+
+		That's it, your new Nova Compute Node is up and running!
+
+		EOF
+	fi
+}
+
+
+##### Main
+
+# Default options
+component_type='cloud'  # which nova component to install
+
+# Read command-line arguments
+while [[ $1 == -* ]]; do
+	case "$1" in
+		-t|--type)
+			if (( $# > 1 )); then
+				if is_supported_component "$2"; then
+					component_type="$2"
+					shift 2
+				else
+					echo "Unsupported component type: $2" 1>&2
+					show_help
+					exit $EX_USAGE
+				fi
+			else
+				echo "The $1 option requires an argument: <type>" 1>&2
+				show_help
+				exit $EX_USAGE
+			fi
+			;;
+		-h|--help|-\?)
+			show_help
+			exit $EX_OK
+			;;
+		-V|--version)
+			echo "$BASENAME $VERSION"
+			exit $EX_OK
+			;;
+		-*)
+			echo "Invalid option: $1" 1>&2
+			show_help
+			exit $EX_USAGE
+			;;
+	esac
+done
+
+# Saftey measures to fail early before problems snowball
+set -o errexit  # exit if any command in this script has a non-zero status code
+set -o nounset  # exit if an uninitialized variable is accidentally used
+
+check_safety
+initialize_dependencies
+initialize_network_variables
+start_log
+
+# User interaction required
+
+show_intro
+get_service_hosts
+get_database_creds
+get_bridge_info
+if [[ $component_type == cloud ]]; then
+	get_project_info
+	bypass_rabbit_splash
+fi
+
+# Automated steps
+
+show_auto_pilot
+install_dependencies
+setup_nova_config
+if [[ $component_type == cloud ]]; then
+	finalize_database
+	generate_credentials
+fi
+configure_network
+restart_services
+if [[ $component_type == cloud ]]; then
+	allow_ping_and_ssh
+	fix_dnsmasq_bug
+fi
+fix_kvm_permissions
+show_closing
+
+exit $EX_OK
