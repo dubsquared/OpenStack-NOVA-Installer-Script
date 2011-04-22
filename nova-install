@@ -507,7 +507,7 @@ install_dependencies() {
 
 	install_packages 'python-software-properties'
 	echo -n "Adding '$PPA' repository ... "
-	add-apt-repository ppa:nova-core/release &>>$LOG_FILE
+	add-apt-repository $PPA &>>$LOG_FILE
 	apt-get update &>>$LOG_FILE
 	echo 'done'
 	install_packages $required_packages
