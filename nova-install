@@ -315,15 +315,12 @@ initialize_dependencies() {
 				nova-network
 				nova-objectstore
 				nova-scheduler
-				python-mysqldb
 				unzip
-				vim
 			"
 			;;
 		compute)
 			required_packages="
 				nova-compute
-				python-mysqldb
 			"
 			;;
 	esac
