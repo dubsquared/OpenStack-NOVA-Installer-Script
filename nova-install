@@ -35,7 +35,7 @@
 
 ##### Constants
 
-readonly VERSION=1.2  # release version of this script
+readonly VERSION=1.2.1  # release version of this script
 
 readonly BASENAME="${0##*/}"                   # name of this script for error output
 readonly LOG_FILE='/var/log/nova/install.log'  # location of script log file
@@ -767,6 +767,11 @@ check_safety
 initialize_dependencies
 initialize_network_variables
 start_log
+
+# Start logging xtrace and redirected output to the same place
+exec 3>>$LOG_FILE
+BASH_XTRACEFD=3
+set -o xtrace
 
 # User interaction required
 
