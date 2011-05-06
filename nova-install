@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# nova-install -- configure a fully functioning OpenStack Nova component
+# nova-install - configure a fully functioning OpenStack Nova component
+
+# For detailed usage instructions, run:
+#   nova-install --help
 
 # This script is intended to be ran on a fresh install on Ubuntu 10.04 64-bit.
 # Once ran with the appropiate variables, it will produce a fully functioning
@@ -38,6 +41,7 @@
 readonly VERSION=1.2.1  # release version of this script
 
 readonly BASENAME="${0##*/}"                   # name of this script for error output
+readonly CREDS_DIR='/root/creds'               # directory to store nova credentials
 readonly LOG_FILE='/var/log/nova/install.log'  # location of script log file
 readonly PARAMETERS="$*"                       # all of the specified input parameters
 readonly PPA='ppa:nova-core/release'           # which ppa to install packages from
@@ -58,13 +62,25 @@ error_exit() {
 	local status="$2"
 	local max_status=255  # highest legal status code
 
+	set -o xtrace
 	echo "ERROR: $message" 1>&2
+	set +o xtrace
+
+	finalize_log 'installation process aborted due to error'
 
 	if is_integer "$status" "$max_status"; then
 		exit $status
 	else
 		exit 1
 	fi
+}
+
+# Remove clutter from log and append a timestamp
+finalize_log() {
+	local message="$1"
+
+	sed -i'' -e '/^+ set +o xtrace$/d' $LOG_FILE
+	echo "$(date) $BASENAME: $message ($PARAMETERS)" >>$LOG_FILE
 }
 
 # Prompt user for an IP address range, validate it, and then assign it to the given variable
@@ -160,12 +176,15 @@ install_packages() {
 	for package in "$@"; do
 		echo -n "Installing package '$package' ... "
 
+		set -o xtrace
 		# skip if the package is already installed
 		if is_installed $package; then
+			set +o xtrace
 			echo 'already installed'
 			continue
 		else
 			apt-get install --quiet --assume-yes $package &>>$LOG_FILE
+			set +o xtrace
 			echo 'done'
 		fi
 	done
@@ -194,7 +213,9 @@ is_integer() {
 
 # Return whether or not the given package is already installed on the system
 is_installed() {
+	set +o xtrace
 	local package="$1"
+	set -o xtrace
 	dpkg -l $package 2>>$LOG_FILE | grep -q 'ii'
 }
 
@@ -341,7 +362,9 @@ initialize_network_variables() {
 
 # Create the log file (if necessary) and append a timestamp
 start_log() {
+	set -o xtrace
 	mkdir -p "${LOG_FILE%/*}"
+	set +o xtrace
 	echo "$(date) $BASENAME: installation process initiated ($PARAMETERS)" >>$LOG_FILE
 }
 
@@ -414,12 +437,14 @@ get_database_creds() {
 	done
 
 	if [[ $component_type == cloud ]]; then
+		set -o xtrace
 		# preseed the password in preparation for package installation
 		cat <<-MYSQL_PRESEED | debconf-set-selections
 			mysql-server-5.1 mysql-server/root_password password $mysql_pass
 			mysql-server-5.1 mysql-server/root_password_again password $mysql_pass
 			mysql-server-5.1 mysql-server/start_on_boot boolean true
 		MYSQL_PRESEED
+		set +o xtrace
 	fi
 }
 
@@ -482,7 +507,9 @@ bypass_rabbit_splash() {
 		read -s -n 1 -p 'Press any key to continue...'
 		echo -e "\n"
 
+		set -o xtrace
 		apt-get install --quiet --assume-yes "$package"
+		set +o xtrace
 	fi
 }
 
@@ -504,8 +531,10 @@ install_dependencies() {
 
 	install_packages 'python-software-properties'
 	echo -n "Adding '$PPA' repository ... "
+	set -o xtrace
 	add-apt-repository $PPA &>>$LOG_FILE
 	apt-get update &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 	install_packages $required_packages
 }
@@ -516,6 +545,7 @@ setup_nova_config() {
 
 	echo -n 'Generating nova.conf ... '
 	if [[ $component_type == cloud ]]; then
+		set -o xtrace
 		cat >> /etc/nova/nova.conf <<-EOF
 			--s3_host=$s3_host_ip
 			--rabbit_host=$rabbit_host_ip
@@ -529,7 +559,9 @@ setup_nova_config() {
 			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
 			--network_manager=nova.network.manager.FlatManager
 		EOF
+		set +o xtrace
 	else
+		set -o xtrace
 		cat >> /etc/nova/nova.conf <<-EOF
 			--s3_host=$s3_host_ip
 			--rabbit_host=$rabbit_host_ip
@@ -538,7 +570,25 @@ setup_nova_config() {
 			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
 			--network_manager=nova.network.manager.FlatManager
 		EOF
+		set +o xtrace
 	fi
+	echo 'done'
+
+	echo -n 'Setting proper permissions for nova.conf ... '
+	if ! grep -q '^nova' /etc/group; then
+		set -o xtrace
+		groupadd nova &>>$LOG_FILE
+		set +o xtrace
+	fi
+	if ! groups nova | grep -q ' nova'; then
+		set -o xtrace
+		usermod -a -G nova nova &>>$LOG_FILE
+		set +o xtrace
+	fi
+	set -o xtrace
+	chown -R root:nova /etc/nova &>>$LOG_FILE
+	chmod 640 /etc/nova/nova.conf &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 }
 
@@ -549,48 +599,58 @@ finalize_database() {
 	subsection_banner 'Finalizing MySQL setup'
 
 	echo -n 'Adjusting MySQL network configuration ... '
+	set -o xtrace
 	# back up original my.cnf file
 	[[ ! -f $mysql_config.bak ]] && cp $mysql_config{,.bak}
 	sed -i 's/127.0.0.1/0.0.0.0/g' $mysql_config
 	service mysql restart &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 
 	echo -n 'Creating database ... '
+	set -o xtrace
 	mysql --user='root' --password="$mysql_pass" --execute "CREATE DATABASE nova;"
 	mysql --user='root' --password="$mysql_pass" --execute "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
 	mysql --user='root' --password="$mysql_pass" --execute "SET PASSWORD FOR 'root'@'%' = PASSWORD('$mysql_pass');"
+	set +o xtrace
 	echo 'done'
 
 	echo -n 'Initializing database ... '
+	set -o xtrace
 	nova-manage db sync &>>$LOG_FILE
 	sleep 1
 	/usr/bin/python /usr/bin/nova-manage user admin $project_user &>>$LOG_FILE
 	/usr/bin/python /usr/bin/nova-manage project create $project_name $project_user &>>$LOG_FILE
 	/usr/bin/python /usr/bin/nova-manage network create $project_cidr $project_network_count $project_ips_per_network &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 }
 
 # Generate user credentials and environment settings
 generate_credentials() {
-	local creds_dir='/root/creds'
-	local novacreds="${creds_dir}/novacreds.zip"
-	local novarc="${creds_dir}/novarc"
+	local novacreds="${CREDS_DIR}/novacreds.zip"
+	local novarc="${CREDS_DIR}/novarc"
 
 	subsection_banner 'Generate Nova user credentials'
 
 	echo -n 'Generating and extracting novacreds.zip ... '
-	mkdir -p $creds_dir
+	mkdir -p $CREDS_DIR
+	set -o xtrace
 	/usr/bin/python /usr/bin/nova-manage project zipfile $project_name $project_user $novacreds &>>$LOG_FILE
 	sleep 3
-	unzip -d $creds_dir $novacreds &>>$LOG_FILE
+	unzip -d $CREDS_DIR $novacreds &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 
 	echo -n 'Appending novarc environment settings to your ~/.bashrc ... '
+	set -o xtrace
 	source $novarc
+	echo -e '\n# OpenStack Nova Credentials' >> $HOME/.bashrc
 	cat $novarc >> $HOME/.bashrc
 	# back up original novarc file
 	[[ ! -f $novarc.bak ]] && cp $novarc{,.bak}
 	sed -i "s/127.0.0.1/$cc_host_ip/g" $novarc
+	set +o xtrace
 	echo 'done'
 }
 
@@ -599,6 +659,7 @@ configure_network() {
 	subsection_banner 'Updating network interfaces'
 
 	echo -n 'Adding bridge device ... '
+	set -o xtrace
 	# back up original interfaces file
 	[[ ! -f /etc/network/interaces.bak ]] && cp /etc/network/interfaces{,.bak}
 
@@ -619,17 +680,22 @@ iface br100 inet static
 	gateway $bridge_gateway
 	dns-nameservers $bridge_nameserver
 EOF
+	set +o xtrace
 	echo 'done'
 
 	echo -n 'Restarting networking service ... '
+	set -o xtrace
 	/etc/init.d/networking restart &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 
 	# any server that does /NOT/ have nova-api running on it will need this
 	# firewall rule for UEC images to be able to fetch metadata info
 	if [[ $component_type != cloud ]]; then
 		echo -n 'Allowing image metadata traffic ... '
+		set -o xtrace
 		iptables -t nat -A PREROUTING -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination $cc_host_ip:8773
+		set +o xtrace
 		echo 'done'
 	fi
 }
@@ -640,17 +706,22 @@ restart_services() {
 
 	echo -n 'Restarting Nova services ... '
 	if [[ $component_type == cloud ]]; then
-		source /root/creds/novarc
+		set -o xtrace
+		source ${CREDS_DIR}/novarc
 		restart libvirt-bin &>>$LOG_FILE
 		restart nova-network &>>$LOG_FILE
 		restart nova-compute &>>$LOG_FILE
 		restart nova-api &>>$LOG_FILE
 		restart nova-objectstore &>>$LOG_FILE
 		restart nova-scheduler &>>$LOG_FILE
+		set +o xtrace
 	else
+		set -o xtrace
 		restart libvirt-bin &>>$LOG_FILE
 		restart nova-compute &>>$LOG_FILE
+		set +o xtrace
 	fi
+	sleep 4
 	echo 'done'
 
 	if [[ $component_type == cloud ]]; then
@@ -658,32 +729,41 @@ restart_services() {
 	else
 		echo -e 'Ensure the Nova compute service is running:\n'
 	fi
-	ps -u nova -F c | grep -v 'su'
-	sleep 4
+
+	set -o xtrace
+	ps -ef c --sort=cmd | egrep 'PID|nova-[acnos]'
+	set +o xtrace
+	sleep 2
 }
 
 # Ensure proper initialization of KVM if it's available;
 # otherwise VMs run in the much slower QEMU mode
 fix_kvm_permissions() {
 	if [[ -f /dev/kvm ]]; then
+		set -o xtrace
 		chgrp kvm /dev/kvm
 		chmod g+rwx /dev/kvm
+		set +o xtrace
 	fi
 }
 
 # Authorize ICMP and SSH traffic between VMs by default
 allow_ping_and_ssh() {
 	echo -n -e "\nAllowing ICMP and SSH access to all VMs ... "
+	set -o xtrace
 	euca-authorize -P icmp -t -1:-1 default &>>$LOG_FILE
 	euca-authorize -P tcp -p 22 default &>>$LOG_FILE
+	set +o xtrace
 	echo 'done'
 }
 
 # Only one dnsmasq process starts, supposed to be two running at different
 # priorities. This fixes that...possible bug?
 fix_dnsmasq_bug() {
+	set -o xtrace
 	killall dnsmasq
 	service nova-network restart &>>$LOG_FILE
+	set +o xtrace
 }
 
 # Display closing message after a successful installation
@@ -694,8 +774,12 @@ show_closing() {
 
 		########################################################################
 		# You /MUST/ re-source your 'novarc' to use the API commands since the #
-		# script cannot pass the source information out of it's own process    #
-		################## e.g. source /root/creds/novarc ######################
+		# script cannot pass the source information out of its own process...  #
+		# the variables have been appended to your ~/.bashrc file for sourcing #
+		########################################################################
+
+		For reference, the generated credentials can be found in ${CREDS_DIR}/
+
 
 		The next thing you are going to want to do it get a VM to test with.
 		You can find a test VM how-to and read about custom image creation here:
@@ -768,10 +852,9 @@ initialize_dependencies
 initialize_network_variables
 start_log
 
-# Start logging xtrace and redirected output to the same place
+# Log xtrace to the log file when enabled
 exec 3>>$LOG_FILE
 BASH_XTRACEFD=3
-set -o xtrace
 
 # User interaction required
 
@@ -801,5 +884,7 @@ if [[ $component_type == cloud ]]; then
 fi
 fix_kvm_permissions
 show_closing
+
+finalize_log 'installation process complete'
 
 exit $EX_OK
