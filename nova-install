@@ -351,7 +351,7 @@ initialize_dependencies() {
 # interface; this could be improved later as it might not work as expected on
 # all systems
 initialize_network_variables() {
-	local interface=$(/sbin/ifconfig -a | grep -m 1 'inet ')
+	local interface=$(/sbin/ifconfig -a | grep 'inet ' | grep -v '127.0.0.1' | head -n 1)
 
 	local_address=$(echo "$interface" | cut -d: -f2 | awk '{ print $1 }')
 	local_broadcast=$(echo "$interface" | cut -d: -f3 | awk '{ print $1 }')
