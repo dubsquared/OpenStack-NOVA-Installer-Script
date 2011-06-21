@@ -762,6 +762,9 @@ fix_kvm_permissions() {
 allow_ping_and_ssh() {
 	echo -n -e "\nAllowing ICMP and SSH access to all VMs ... "
 	set -o xtrace
+	# euca-authorize shouldn't use a proxy
+	unset http_proxy
+	unset https_proxy
 	euca-authorize -P icmp -t -1:-1 default &>>$LOG_FILE
 	euca-authorize -P tcp -p 22 default &>>$LOG_FILE
 	set +o xtrace
