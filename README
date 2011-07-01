@@ -1,3 +1,10 @@
+If you'd like to contribute code or ideas for improving this script, planned
+changes are being documented here:
+
+     http://etherpad.openstack.org/nova-install-script-todos
+
+-----
+
 NAME
      nova-install -- configure a fully functioning OpenStack Nova component
 
