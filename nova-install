@@ -38,13 +38,13 @@
 
 ##### Constants
 
-readonly VERSION=1.0  # release version of this script
+readonly VERSION=1.1  # release version of this script
 
 readonly BASENAME="${0##*/}"                   # name of this script for error output
 readonly CREDS_DIR='/root/creds'               # directory to store nova credentials
 readonly LOG_FILE='/var/log/nova/install.log'  # location of script log file
 readonly PARAMETERS="$*"                       # all of the specified input parameters
-readonly PPA='ppa:nova-core/release'           # which ppa to install packages from
+readonly PPA='ppa:openstack-release/2011.3'    # which ppa to install packages from
 readonly ROOT_UID=0                            # users with $UID 0 have root privileges
 
 # Exit codes
@@ -631,7 +631,7 @@ finalize_database() {
 	sleep 1
 	/usr/bin/python /usr/bin/nova-manage user admin $project_user &>>$LOG_FILE
 	/usr/bin/python /usr/bin/nova-manage project create $project_name $project_user &>>$LOG_FILE
-	/usr/bin/python /usr/bin/nova-manage network create $project_cidr $project_network_count $project_ips_per_network &>>$LOG_FILE
+	/usr/bin/python /usr/bin/nova-manage network create private $project_cidr $project_network_count $project_ips_per_network --bridge=br100 &>>$LOG_FILE
 	set +o xtrace
 	echo 'done'
 }
