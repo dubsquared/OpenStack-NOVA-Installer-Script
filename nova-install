@@ -560,7 +560,7 @@ setup_nova_config() {
 			--verbose
 			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
 			--network_manager=nova.network.manager.FlatDHCPManageri
-			--glance_host=$glance_host_ip
+			--glance_api_servers=$glance_host_ip:9292
 			--image_service=nova.image.glance.GlanceImageService
 
 		EOF
