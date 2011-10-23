@@ -38,7 +38,7 @@
 
 ##### Constants
 
-readonly VERSION=1.2.1  # release version of this script
+readonly VERSION=1.0  # release version of this script
 
 readonly BASENAME="${0##*/}"                   # name of this script for error output
 readonly CREDS_DIR='/root/creds'               # directory to store nova credentials
