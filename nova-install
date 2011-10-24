@@ -552,7 +552,6 @@ setup_nova_config() {
 			--s3_host=$s3_host_ip
 			--rabbit_host=$rabbit_host_ip
 			--cc_host=$cc_host_ip
-			--ec2_url=http://$s3_host_ip:8773/services/Cloud
 			--ec2_host=$s3_host_ip
 			--osapi_host=$s3_host_ip
 			--fixed_range=$fixed_range
@@ -633,7 +632,7 @@ finalize_database() {
 	sleep 1
 	/usr/bin/python /usr/bin/nova-manage user admin $project_user &>>$LOG_FILE
 	/usr/bin/python /usr/bin/nova-manage project create $project_name $project_user &>>$LOG_FILE
-	/usr/bin/python /usr/bin/nova-manage network create private $project_cidr $project_network_count $project_ips_per_network --bridge=br100 &>>$LOG_FILE
+	/usr/bin/python /usr/bin/nova-manage network create public $project_cidr $project_network_count $project_ips_per_network --bridge=br100 &>>$LOG_FILE
 	set +o xtrace
 	echo 'done'
 }
