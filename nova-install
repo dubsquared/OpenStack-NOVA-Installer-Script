@@ -553,6 +553,8 @@ setup_nova_config() {
 			--rabbit_host=$rabbit_host_ip
 			--cc_host=$cc_host_ip
 			--ec2_url=http://$s3_host_ip:8773/services/Cloud
+			--ec2_host=$s3_host_ip
+			--osapi_host=$s3_host_ip
 			--fixed_range=$fixed_range
 			--network_size=$network_size
 			--FAKE_subdomain=ec2
