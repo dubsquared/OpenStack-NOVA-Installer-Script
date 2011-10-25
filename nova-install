@@ -565,7 +565,8 @@ setup_nova_config() {
 			--image_service=nova.image.glance.GlanceImageService
 
 		EOF
-		sed -i 's/^\(ql_connection\s*=\s*\).*$/\1mysql:\/\/root:'$mysql_pass'@127\.0\.0\.1\/glance/' /etc/glance/glance.conf
+		sed -i 's/^\(ql_connection\s*=\s*\).*$/\1mysql:\/\/root:'$mysql_pass'@127\.0\.0\.1\/glance/' /etc/glance/glance-registry.conf
+		sed -i 's/^\(ql_connection\s*=\s*\).*$/\1mysql:\/\/root:'$mysql_pass'@127\.0\.0\.1\/glance/' /etc/glance/glance-scrubber.conf
 		set +o xtrace
 	else
 		set -o xtrace
