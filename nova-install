@@ -573,10 +573,11 @@ setup_nova_config() {
 			--s3_host=$s3_host_ip
 			--rabbit_host=$rabbit_host_ip
 			--cc_host=$cc_host_ip
-			--ec2_url=http://$s3_host_ip:8773/services/Cloud
+			--ec2_host=$s3_host_ip
+			--osapi_host=$s3_host_ip
 			--sql_connection=mysql://root:$mysql_pass@$mysql_host_ip/nova
 			--network_manager=nova.network.manager.FlatDHCPManager
-			--glance_host=$glance_host_ip
+			--glance_api_servers=$glance_host_ip:9292
 			--image_service=nova.image.glance.GlanceImageService
 
 		EOF
