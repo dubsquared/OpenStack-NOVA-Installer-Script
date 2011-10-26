@@ -1,0 +1,34 @@
+If you'd like to contribute code or ideas for improving this script, planned
+changes are being documented here:
+
+     http://etherpad.openstack.org/nova-install-script-todos
+
+-----
+
+NAME
+     nova-install -- configure a fully functioning OpenStack Nova component
+
+SYNOPSIS
+     nova-install [-t type] [-V] [-h]
+
+DESCRIPTION
+     The nova-install command will gather information, install dependencies,
+     and then configure one of a number of different OpenStack component
+     types as specified on the command line.
+
+     A cloud controller will be configured to run all five Nova services
+     (api, compute, network, objectstor, and scheduler), while a compute
+     node will only run Nova's compute service.
+
+OPTIONS
+     -t, --type <type>
+          Changes the type of component to install. Currently implemented
+          types are 'cloud' (default) for installing a new cloud
+          controller, and 'compute' for installing a compute node for an
+          existing cloud.
+
+     -V, --version
+          Print the nova-install script's version information and exit.
+
+     -h, --help
+          View this help message about the available command-line options.
