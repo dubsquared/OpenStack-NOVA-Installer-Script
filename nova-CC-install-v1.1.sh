@@ -477,7 +477,7 @@ install_package ${REQUIRED_PACKAGES}
 #add-apt-repository ppa:nova-core/ppa &>> $LOGFILE
 add-apt-repository ppa:nova-core/release &>> $LOGFILE
 apt-get update &>> $LOGFILE
-REQUIRED_PACKAGES="python-mysqldb mysql-server nova-api nova-network nova-objectstore nova-scheduler nova-compute unzip vim euca2ools glance"
+REQUIRED_PACKAGES="python-mysqldb mysql-server nova-api nova-network nova-objectstore nova-scheduler nova-compute unzip vim euca2ools glance kvm-pxe"
 #REQUIRED_PACKAGES="mysql-server bzr nova-common nova-doc python-mysqldb python-greenlet python-nova nova-api nova-network nova-objectstore nova-scheduler nova-compute unzip vim euca2ools dnsmasq open-iscsi kpartx kvm gawk iptables ebtables user-mode-linux kvm libvirt-bin screen iscsitarget euca2ools vlan curl python-twisted python-sqlalchemy python-mox python-greenlet python-carrot python-daemon python-eventlet python-gflags python-libvirt python-libxml2 python-routes"
 install_package ${REQUIRED_PACKAGES}
 
