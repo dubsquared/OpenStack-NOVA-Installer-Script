@@ -338,6 +338,7 @@ initialize_dependencies() {
 				nova-scheduler
 				unzip
 				glance
+				kvm-pxe
 			"
 			;;
 		compute)
