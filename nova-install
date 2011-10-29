@@ -746,7 +746,7 @@ restart_services() {
 	fi
 
 	set -o xtrace
-	ps -ef c --sort=cmd | egrep 'PID|nova-[acnos]'
+	ps -ef c --sort=cmd | egrep 'PID|nova-[acnos]|glance-[ar]'
 	set +o xtrace
 	sleep 2
 }
